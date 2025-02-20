@@ -1,0 +1,102 @@
+from scapy.all import *
+import time
+import smtplib
+from email.mime.text import MIMEText
+import os
+
+# Configuration
+THRESHOLD_MAC = 50  # Max MAC addresses per second to detect MAC flooding
+THRESHOLD_ARP = 5    # Max ARP responses per second to detect ARP spoofing
+THRESHOLD_DHCP = 10  # Max DHCP requests per second to detect DHCP starvation
+LOG_FILE = "layer2_alerts.log"
+ALERT_EMAIL = "your_email@example.com"
+SMTP_SERVER = "smtp.example.com"
+SMTP_PORT = 587
+SMTP_USER = "your_email@example.com"
+SMTP_PASS = "your_password"
+INTERFACE = "Ethernet"  # Change to match your GNS3 network interface
+
+# Data structures for tracking packets
+mac_table = {}
+arp_table = {}
+dhcp_table = {}
+stp_table = {}
+
+# Function to log alerts
+def log_alert(message):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    alert_msg = f"[{timestamp}] ALERT: {message}\n"
+    print(alert_msg)
+    with open(LOG_FILE, "a") as log_file:
+        log_file.write(alert_msg)
+    send_email_alert(message)
+
+# Function to send email alerts
+def send_email_alert(message):
+    try:
+        msg = MIMEText(message)
+        msg["Subject"] = "Layer 2 Attack Detected"
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERT_EMAIL
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_USER, ALERT_EMAIL, msg.as_string())
+    except Exception as e:
+        print(f"Email alert failed: {e}")
+
+# Function to detect MAC flooding
+def detect_mac_flooding():
+    global mac_table
+    mac_table = {mac: count for mac, count in mac_table.items() if time.time() - count[1] < 1}
+    if len(mac_table) > THRESHOLD_MAC:
+        log_alert(f"MAC Flooding detected! Unique MACs: {len(mac_table)}")
+
+# Function to detect ARP Spoofing
+def detect_arp_spoofing(pkt):
+    if ARP in pkt and pkt[ARP].op == 2:  # ARP response
+        sender_ip = pkt[ARP].psrc
+        sender_mac = pkt[ARP].hwsrc
+        if sender_ip in arp_table and arp_table[sender_ip] != sender_mac:
+            log_alert(f"ARP Spoofing detected! IP: {sender_ip} MAC: {sender_mac}")
+        arp_table[sender_ip] = sender_mac
+
+# Function to detect DHCP starvation
+def detect_dhcp_starvation(pkt):
+    if DHCP in pkt and pkt[DHCP].options[0][1] == 1:  # DHCP Discover
+        mac_address = pkt[Ether].src
+        dhcp_table[mac_address] = dhcp_table.get(mac_address, 0) + 1
+        if dhcp_table[mac_address] > THRESHOLD_DHCP:
+            log_alert(f"DHCP Starvation detected! MAC: {mac_address}")
+
+# Function to detect STP attacks
+def detect_stp_attack(pkt):
+    if pkt.haslayer(Dot3) and pkt.haslayer(LLC) and pkt.haslayer(STP):
+        sender_mac = pkt.src
+        if sender_mac not in stp_table:
+            stp_table[sender_mac] = 1
+        else:
+            stp_table[sender_mac] += 1
+        if stp_table[sender_mac] > 3:
+            log_alert(f"STP Attack detected! Suspicious MAC: {sender_mac}")
+
+# Packet Sniffing Function
+def packet_handler(pkt):
+    if Ether in pkt:
+        mac_table[pkt[Ether].src] = (mac_table.get(pkt[Ether].src, (0, time.time()))[0] + 1, time.time())
+        detect_mac_flooding()
+    if ARP in pkt:
+        detect_arp_spoofing(pkt)
+    if DHCP in pkt:
+        detect_dhcp_starvation(pkt)
+    if pkt.haslayer(Dot3) and pkt.haslayer(LLC) and pkt.haslayer(STP):
+        detect_stp_attack(pkt)
+
+# Start Sniffing
+def start_monitoring():
+    print("Starting Layer 2 Attack Monitoring on interface:", INTERFACE)
+    sniff(prn=packet_handler, store=0, iface=INTERFACE)
+
+if __name__ == "__main__":
+    start_monitoring()
